@@ -1,4 +1,4 @@
-pub type Bitboard u64;
+pub type Bitboard = u64;
 
 pub const EMPTY: Bitboard  = 0;
 pub const FULL: Bitboard = 0xFFFF_FFFF_FFFF_FFFF;
@@ -30,7 +30,7 @@ pub const QUEENS_START: Bitboard = 0x8000_0000_0000_0008;
 pub const KINGS_START: Bitboard = 0x0100_0000_0000_0010;
 
 pub const ALL_START: Bitboard = 0xFFFF_0000_0000_FFFF;
-pub const WHTIE_START: Bitboard = 0x0000_0000_0000_FFFF;
+pub const WHITE_START: Bitboard = 0x0000_0000_0000_FFFF;
 pub const BLACK_START: Bitboard = 0xFFFF_0000_0000_0000;
 
 

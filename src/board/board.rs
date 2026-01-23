@@ -1,20 +1,24 @@
 /// Board Struct
 /// bitboard implementation
 
-#[derive(Clone, Copy Debug, PartialEq, Eq)]
+use std::fmt;
+use crate::board::bitboard::*;
+use crate::board::zobrist::*;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Board {
   // One bitboard per piece type 
-  pub piece_bb: [Bitboard; 7]
+  pub piece_bb: [Bitboard; 7],
   // one bitboard per color
-  pub color_bb: [Bitboard; 2]
+  pub color_bb: [Bitboard; 2],
 
   //occupancy bitboards
-  all_pieces: Bitboard,
+  occupied: Bitboard,
 
   //state
   side_to_move: Color,
   castling_rights: CastlingRights,
-  en_passant_square: Option<Square>,
+  en_passant_square: Option<u8>,
   halfmove_clock: u8,
   fullmove_number: u16,
 
@@ -22,10 +26,11 @@ pub struct Board {
   hash: u64,
 }
 
+#[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Color {
-  White,
-  Black,
+  White = 0,
+  Black = 1,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,8 +67,6 @@ impl From<u8> for PieceType {
   }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Square(u8);
 
 #[derive(Debug)]
 pub enum FenError {
@@ -76,22 +79,22 @@ pub enum FenError {
 }
 
 impl fmt::Display for FenError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            FenError::InvalidFormat => write!(f, "Invalid FEN format"),
-            FenError::InvalidPiece => write!(f, "Invalid piece character"),
-            FenError::InvalidColor => write!(f, "Invalid color"),
-            FenError::InvalidSquare => write!(f, "Invalid square"),
-            FenError::InvalidRankLength => write!(f, "Invalid rank length"),
-            FenError::ParseIntError => write!(f, "Failed to parse integer"),
-        }
+  fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    match self {
+      FenError::InvalidFormat => write!(f, "Invalid FEN format"),
+      FenError::InvalidPiece => write!(f, "Invalid piece character"),
+      FenError::InvalidColor => write!(f, "Invalid color"),
+      FenError::InvalidSquare => write!(f, "Invalid square"),
+      FenError::InvalidRankLength => write!(f, "Invalid rank length"),
+      FenError::ParseIntError => write!(f, "Failed to parse integer"),
     }
+  }
 }
 
 impl Board {
     
   pub fn new() -> Self{
-    let mut board = Board {
+    let board = Board {
       piece_bb: [EMPTY; 7],
       color_bb: [EMPTY; 2],
 
@@ -108,51 +111,93 @@ impl Board {
       fullmove_number: 1,
       hash:0,
     };
-    pos.setup();
-    pos.calc_hash();
-    pos
+    board
   }
 
   pub fn startpos() -> Self {
     //starting position
-    Self {
-      side_to_move: Color::White,
-      castling_rights: CastlingRights {
-        white_kingside: true,
-        white_queenside: true,
-        black_kingside: true,
-        black_queenside: true,
-      },
-      en_passant_square: None,
-      halfmove_clock: 0,
-
-    }
+    let mut b = Board::new();
+    b.setup();
+    b.side_to_move = Color::White;
+    b.castling_rights = CastlingRights {
+      white_kingside: true,
+      white_queenside: true,
+      black_kingside: true,
+      black_queenside: true,
+    };
+    b.en_passant_square = None;
+    b.halfmove_clock = 0;
+    b.fullmove_number = 1;
+    b.calc_hash();
+    b
   }
 
   pub fn from_fen(fen: &str) -> Result<Self, FenError> {
+    //create empty board
+    let mut board = Board {
+      piece_bb: [EMPTY; 7],
+      color_bb: [EMPTY; 2], 
+      occupied: EMPTY,
+      side_to_move: Color::White,
+      castling_rights: CastlingRights {
+        white_kingside: false,
+        white_queenside: false,
+        black_kingside: false,
+        black_queenside: false,
+      },
+      en_passant_square: None,
+      halfmove_clock: 0,
+      fullmove_number: 1,
+      hash:0,
+    };
+
     //split fen into sections
     let slices: Vec<&str> = fen.split_whitespace().collect();
 
-    if slices.len != 6 {
+    if slices.len() != 6 {
       return Err(FenError::InvalidFormat);
     }
 
     // board section
-    
+    board.parse_bboards(slices[0])?;
+    //side to move
+    match slices[1] {
+      "w" => board.side_to_move = Color::White,
+      "b" => board.side_to_move = Color::Black,
+      _ => return Err(FenError::InvalidColor),  
+    }
+    //castling rights
+    for ch in slices[2].chars() {
+      match ch {
+        'K' => board.castling_rights.white_kingside = true,
+        'Q' => board.castling_rights.white_queenside = true,
+        'k' => board.castling_rights.black_kingside = true,
+        'q' => board.castling_rights.black_queenside = true,
+        '-' => {},
+        _ => return Err(FenError::InvalidFormat),
+      }
+    }
 
-      
+    //en passant square
+    if slices[3] != "-" {
+      board.en_passant_square = algebraic_to_square(slices[3]);
+    }
 
-      
+    //halfmove clock
+    board.halfmove_clock = slices[4].parse().map_err(|_| FenError::ParseIntError)?;
+
+    //fullmove number
+    board.fullmove_number = slices[5].parse().map_err(|_| FenError::ParseIntError)?;
+
+    //calculate hash
+    board.calc_hash();
+
+    Ok(board)
   }
 
-  fn parse_bboards(board: &str) -> Result<[Bitboard; 10], FenError>{
-    let white_bb: u8 = 7;
-    let black_bb: u8 = 8;
-    let occupied: u8 = 9;
-    
-    let bbs: [Bitboard; 10];
-
-    let ranks: Vec<&str> = position.split('/').collect();
+  fn parse_bboards(&mut self, board: &str) -> Result<(), FenError>{
+    // splits ranks by '/'
+    let ranks: Vec<&str> = board.split('/').collect();
     
     if ranks.len() != 8 {
       return Err(FenError::InvalidFormat);
@@ -170,10 +215,9 @@ impl Board {
         if ch.is_ascii_digit() {
           let skip = ch.to_digit(10).unwrap() as usize;
           file_idx += skip;
-        } else {
-          let piece = parse_piece(ch)?;
+        } else {  
           let square_idx = actual_rank * 8 + file_idx;
-          squares[square_idx] = Some(piece);
+          self.parse_and_place_piece(ch, square_idx as u8)?;
           file_idx += 1;
         }
       }
@@ -182,11 +226,10 @@ impl Board {
         return Err(FenError::InvalidRankLength);
       }
     }
-
-
+    Ok(())
   }
 
-  fn parse_piece(ch: char) -> Result<Piece, FenError> {
+  fn parse_and_place_piece(&mut self, ch: char, sq: u8) -> Result<(), FenError> {
     let color = if ch.is_uppercase() {
       Color::White
     } else {
@@ -202,9 +245,10 @@ impl Board {
       'k' => PieceType::King,
       _ => return Err(FenError::InvalidPiece),
     };
-    
-    Ok(Piece { color, piece_type })
-}
+
+    self.place_piece(sq, piece_type, color);
+    Ok(())
+  }
 
   #[inline(always)]
   pub fn place_piece(&mut self, square: u8, piece_type: PieceType, color: Color) {
@@ -218,16 +262,121 @@ impl Board {
   }
 
   pub fn setup(&mut self){
-    piece_bb[PieceType::Pawn] = PAWNS_START;
-    piece_bb[PieceType::Knight] = KNIGHTS_START_START;
-    piece_bb[PieceType::Bishop] = BISHOPS_START;
-    piece_bb[PieceType::Rook] = ROOKS_START;
-    piece_bb[PieceType::Queen] = QUEENS_START;
-    piece_bb[PieceType::King] = KINGS_START;
+    self.piece_bb[PieceType::Pawn as usize] = PAWNS_START;
+    self.piece_bb[PieceType::Knight as usize] = KNIGHTS_START;
+    self.piece_bb[PieceType::Bishop as usize] = BISHOPS_START;
+    self.piece_bb[PieceType::Rook as usize] = ROOKS_START;
+    self.piece_bb[PieceType::Queen as usize] = QUEENS_START;
+    self.piece_bb[PieceType::King as usize] = KINGS_START;
 
-    color_bb[Color::White] = WHTIE_START;
-    color_bb[Color::Black] = BLACK_START;
+    self.color_bb[Color::White as usize] = WHITE_START;
+    self.color_bb[Color::Black as usize] = BLACK_START;
+    self.occupied = self.color_bb[0] | self.color_bb[1];
   }
+
+
+  fn calc_hash(&mut self) {
+    //calculate zobrist hash for current position
+    self.hash = 0;
+    for square in 0..64 {
+      let mask = square_mask(square);
+      for piece_type in 1..=6u8 {
+        let idx = piece_type as usize;
+        if has_bit(self.piece_bb[idx], square) {
+          let color = if has_bit(self.color_bb[Color::White as usize], square) {
+            Color::White
+          } else {
+            Color::Black
+          };
+          self.hash ^= zobrist_keys()[idx][color as usize][square as usize];
+        }
+      }
+    }
+
+    //side to move
+    if self.side_to_move == Color::Black {
+      self.hash ^= zobrist_side_to_move();
+    }
+
+    //castling rights
+    if self.castling_rights.white_kingside {
+      self.hash ^= zobrist_castling_rights()[0];
+    }
+    if self.castling_rights.white_queenside {
+      self.hash ^= zobrist_castling_rights()[1];
+    }
+    if self.castling_rights.black_kingside {
+      self.hash ^= zobrist_castling_rights()[2];
+    }
+    if self.castling_rights.black_queenside {
+      self.hash ^= zobrist_castling_rights()[3];
+    }
+
+    //en passant square
+    if let Some(sq) = self.en_passant_square {
+      self.hash ^= zobrist_en_passant()[sq as usize];
+    }
+  }
+
 }
+
+
+  #[cfg(test)]
+  mod tests {
+    use super::*;
+
+    #[test]
+    fn new_board_is_empty() {
+      let b = Board::new();
+      for &bb in &b.piece_bb {
+        assert_eq!(bb, EMPTY);
+      }
+      assert_eq!(b.color_bb[Color::White as usize], EMPTY);
+      assert_eq!(b.color_bb[Color::Black as usize], EMPTY);
+      assert_eq!(b.occupied, EMPTY);
+      assert_eq!(b.hash, 0);
+      assert_eq!(b.side_to_move, Color::White);
+    }
+
+    #[test]
+    fn startpos_and_fen_hash_match() {
+      let b1 = Board::startpos();
+      let fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+      let b2 = Board::from_fen(fen).expect("from_fen failed");
+
+      assert_eq!(b1.piece_bb, b2.piece_bb);
+      assert_eq!(b1.color_bb, b2.color_bb);
+      assert_eq!(b1.occupied, b2.occupied);
+      assert_eq!(b1.hash, b2.hash);
+    }
+
+    #[test]
+    fn hash_changes_with_side_to_move_and_ep_and_castling() {
+      let b = Board::startpos();
+
+      let mut b_side = b;
+      b_side.side_to_move = Color::Black;
+      b_side.calc_hash();
+      assert_ne!(b.hash, b_side.hash);
+
+      let mut b_ep = b;
+      b_ep.en_passant_square = Some(16);
+      b_ep.calc_hash();
+      assert_ne!(b.hash, b_ep.hash);
+
+      let mut b_castle = b;
+      b_castle.castling_rights.white_kingside = false;
+      b_castle.castling_rights.white_queenside = false;
+      b_castle.castling_rights.black_kingside = false;
+      b_castle.castling_rights.black_queenside = false;
+      b_castle.calc_hash();
+      assert_ne!(b.hash, b_castle.hash);
+    }
+
+    #[test]
+    fn from_fen_invalid() {
+      assert!(Board::from_fen("invalid fen").is_err());
+    }
+  }
 
 
