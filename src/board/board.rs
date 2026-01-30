@@ -279,7 +279,6 @@ impl Board {
     //calculate zobrist hash for current position
     self.hash = 0;
     for square in 0..64 {
-      let mask = square_mask(square);
       for piece_type in 1..=6u8 {
         let idx = piece_type as usize;
         if has_bit(self.piece_bb[idx], square) {
@@ -376,6 +375,62 @@ impl Board {
     #[test]
     fn from_fen_invalid() {
       assert!(Board::from_fen("invalid fen").is_err());
+    }
+
+    #[test]
+    fn zobrist_different_positions_have_unique_hashes() {
+      // Various positions should all have different hashes
+      let positions = [
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",      // startpos
+        "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1",   // 1.e4
+        "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2", // 1.e4 e5
+        "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq c6 0 2", // 1.e4 c5
+        "r1bqkbnr/pppppppp/2n5/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 1 2",  // 1.e4 Nc6
+      ];
+
+      let hashes: Vec<u64> = positions
+        .iter()
+        .map(|fen| Board::from_fen(fen).unwrap().hash)
+        .collect();
+
+      // All hashes should be unique
+      for i in 0..hashes.len() {
+        for j in (i+1)..hashes.len() {
+          assert_ne!(hashes[i], hashes[j],
+            "Hash collision between position {} and {}", i, j);
+        }
+      }
+
+      // All hashes should be non-zero (positions have pieces)
+      for (i, &h) in hashes.iter().enumerate() {
+        assert_ne!(h, 0, "Position {} has zero hash", i);
+      }
+    }
+
+    #[test]
+    fn zobrist_hash_is_deterministic() {
+      let fen = "r1bqkb1r/pppp1ppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4";
+      let b1 = Board::from_fen(fen).unwrap();
+      let b2 = Board::from_fen(fen).unwrap();
+      assert_eq!(b1.hash, b2.hash);
+    }
+
+    #[test]
+    fn zobrist_keys_are_nonzero() {
+      // Verify key quality
+      let keys = zobrist_keys();
+      for piece in 1..=6 {
+        for color in 0..2 {
+          for sq in 0..64 {
+            assert_ne!(keys[piece][color][sq], 0,
+              "Zero key at piece={}, color={}, sq={}", piece, color, sq);
+          }
+        }
+      }
+      assert_ne!(zobrist_side_to_move(), 0);
+      for i in 0..4 {
+        assert_ne!(zobrist_castling_rights()[i], 0);
+      }
     }
   }
 

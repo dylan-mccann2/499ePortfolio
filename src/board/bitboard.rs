@@ -26,8 +26,8 @@ pub const PAWNS_START: Bitboard = 0x00FF_0000_0000_FF00;
 pub const KNIGHTS_START: Bitboard = 0x4200_0000_0000_0042;
 pub const BISHOPS_START: Bitboard = 0x2400_0000_0000_0024;
 pub const ROOKS_START: Bitboard = 0x8100_0000_0000_0081;
-pub const QUEENS_START: Bitboard = 0x8000_0000_0000_0008;
-pub const KINGS_START: Bitboard = 0x0100_0000_0000_0010;
+pub const QUEENS_START: Bitboard = 0x0800_0000_0000_0008;
+pub const KINGS_START: Bitboard = 0x1000_0000_0000_0010;
 
 pub const ALL_START: Bitboard = 0xFFFF_0000_0000_FFFF;
 pub const WHITE_START: Bitboard = 0x0000_0000_0000_FFFF;
