@@ -1,10 +1,18 @@
-/// Board Struct
-/// bitboard implementation
+// Board representation and logic.
+
+// Declare the sub-modules found in the src/board/ directory
+pub mod bitboard;
+pub mod zobrist;
+
+// Re-export the important parts of the sub-modules for a cleaner public API.
+// This allows other parts of the crate to use `chess::board::Bitboard` 
+pub use bitboard::*;
+pub use zobrist::*;
 
 use std::fmt;
-use crate::board::bitboard::*;
-use crate::board::zobrist::*;
 
+/// Board Struct
+/// uses bitboard implementation
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Board {
   // One bitboard per piece type 
@@ -33,14 +41,33 @@ pub enum Color {
   Black = 1,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CastlingRights {
-  white_kingside: bool,
-  white_queenside: bool,
-  black_kingside: bool,
-  black_queenside: bool,
+impl Color {
+    pub fn opposite(&self) -> Self {
+        match self {
+            Color::White => Color::Black,
+            Color::Black => Color::White,
+        }
+    }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CastlingRights {
+  pub white_kingside: bool,
+  pub white_queenside: bool,
+  pub black_kingside: bool,
+  pub black_queenside: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Unmove {
+  pub mv: crate::movegen::Move,
+  pub captured: PieceType,
+  pub captured_sq: u8,
+  pub piece_moved: PieceType,
+  pub prev_castling: CastlingRights,
+  pub prev_ep: Option<u8>,
+  pub prev_halfmove: u8,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PieceType {
@@ -93,6 +120,30 @@ impl fmt::Display for FenError {
 
 impl Board {
     
+  pub fn get_occupied(&self) -> Bitboard {
+    self.occupied
+  }
+
+  pub fn get_color_bb(&self, color: Color) -> Bitboard {
+    self.color_bb[color as usize]
+  }
+
+  pub fn get_piece_bb(&self, piece_type: PieceType) -> Bitboard {
+    self.piece_bb[piece_type as usize]
+  }
+
+  pub fn get_side_to_move(&self) -> Color {
+    self.side_to_move
+  }
+
+  pub fn get_en_passant_square(&self) -> Option<u8> {
+    self.en_passant_square
+  }
+
+  pub fn get_castling_rights(&self) -> CastlingRights {
+    self.castling_rights
+  }
+
   pub fn new() -> Self{
     let board = Board {
       piece_bb: [EMPTY; 7],
@@ -275,6 +326,232 @@ impl Board {
   }
 
 
+  pub fn piece_at(&self, sq: u8) -> PieceType {
+    let mask = square_mask(sq);
+    for piece_type in 1..=6u8 {
+      if self.piece_bb[piece_type as usize] & mask != 0 {
+        return PieceType::from(piece_type);
+      }
+    }
+    PieceType::None
+  }
+
+  pub fn remove_piece(&mut self, sq: u8, piece_type: PieceType, color: Color) {
+    let mask = square_mask(sq);
+    self.piece_bb[piece_type as usize] &= !mask;
+    self.color_bb[color as usize] &= !mask;
+    self.occupied &= !mask;
+  }
+
+  pub fn make_move(&mut self, mv: &crate::movegen::Move) -> Unmove {
+    let us = self.side_to_move;
+    let them = us.opposite();
+    let from_mask = square_mask(mv.from);
+    let to_mask = square_mask(mv.to);
+
+    // Store state for unmake
+    let prev_castling = self.castling_rights;
+    let prev_ep = self.en_passant_square;
+    let prev_halfmove = self.halfmove_clock;
+
+    // Find the piece type being moved
+    let piece_type = self.piece_at(mv.from);
+
+    // Check for capture (including en passant)
+    let mut captured = self.piece_at(mv.to);
+    let mut captured_sq = mv.to;
+
+    // Handle en passant capture
+    if piece_type == PieceType::Pawn {
+      if let Some(ep_sq) = self.en_passant_square {
+        if mv.to == ep_sq {
+          captured_sq = if us == Color::White { ep_sq - 8 } else { ep_sq + 8 };
+          captured = PieceType::Pawn;
+          self.remove_piece(captured_sq, PieceType::Pawn, them);
+        }
+      }
+    }
+
+    // Remove captured piece (non-ep)
+    if captured != PieceType::None && captured_sq == mv.to {
+      self.remove_piece(mv.to, captured, them);
+    }
+
+    // Move the piece
+    self.piece_bb[piece_type as usize] &= !from_mask;
+    self.piece_bb[piece_type as usize] |= to_mask;
+    self.color_bb[us as usize] &= !from_mask;
+    self.color_bb[us as usize] |= to_mask;
+
+    // Handle promotion
+    if let Some(promo_piece) = mv.promotion {
+      self.piece_bb[PieceType::Pawn as usize] &= !to_mask;
+      self.piece_bb[promo_piece as usize] |= to_mask;
+    }
+
+    // Handle castling
+    if piece_type == PieceType::King {
+      let from_file = get_file(mv.from);
+      let to_file = get_file(mv.to);
+      if from_file == 4 && to_file == 6 {
+        // Kingside castle
+        let rook_from = if us == Color::White { 7 } else { 63 };
+        let rook_to = if us == Color::White { 5 } else { 61 };
+        let rook_from_mask = square_mask(rook_from);
+        let rook_to_mask = square_mask(rook_to);
+        self.piece_bb[PieceType::Rook as usize] &= !rook_from_mask;
+        self.piece_bb[PieceType::Rook as usize] |= rook_to_mask;
+        self.color_bb[us as usize] &= !rook_from_mask;
+        self.color_bb[us as usize] |= rook_to_mask;
+      } else if from_file == 4 && to_file == 2 {
+        // Queenside castle
+        let rook_from = if us == Color::White { 0 } else { 56 };
+        let rook_to = if us == Color::White { 3 } else { 59 };
+        let rook_from_mask = square_mask(rook_from);
+        let rook_to_mask = square_mask(rook_to);
+        self.piece_bb[PieceType::Rook as usize] &= !rook_from_mask;
+        self.piece_bb[PieceType::Rook as usize] |= rook_to_mask;
+        self.color_bb[us as usize] &= !rook_from_mask;
+        self.color_bb[us as usize] |= rook_to_mask;
+      }
+    }
+
+    // Update castling rights
+    if piece_type == PieceType::King {
+      if us == Color::White {
+        self.castling_rights.white_kingside = false;
+        self.castling_rights.white_queenside = false;
+      } else {
+        self.castling_rights.black_kingside = false;
+        self.castling_rights.black_queenside = false;
+      }
+    }
+    if piece_type == PieceType::Rook {
+      match mv.from {
+        0 => self.castling_rights.white_queenside = false,
+        7 => self.castling_rights.white_kingside = false,
+        56 => self.castling_rights.black_queenside = false,
+        63 => self.castling_rights.black_kingside = false,
+        _ => {}
+      }
+    }
+    // Rook captured
+    match mv.to {
+      0 => self.castling_rights.white_queenside = false,
+      7 => self.castling_rights.white_kingside = false,
+      56 => self.castling_rights.black_queenside = false,
+      63 => self.castling_rights.black_kingside = false,
+      _ => {}
+    }
+
+    // Update en passant square
+    self.en_passant_square = None;
+    if piece_type == PieceType::Pawn {
+      let from_rank = get_rank(mv.from);
+      let to_rank = get_rank(mv.to);
+      if (from_rank == 1 && to_rank == 3) || (from_rank == 6 && to_rank == 4) {
+        self.en_passant_square = Some(if us == Color::White { mv.from + 8 } else { mv.from - 8 });
+      }
+    }
+
+    // Update halfmove clock
+    if piece_type == PieceType::Pawn || captured != PieceType::None {
+      self.halfmove_clock = 0;
+    } else {
+      self.halfmove_clock += 1;
+    }
+
+    // Update fullmove number
+    if us == Color::Black {
+      self.fullmove_number += 1;
+    }
+
+    // Update occupied
+    self.occupied = self.color_bb[0] | self.color_bb[1];
+
+    // Switch side to move
+    self.side_to_move = them;
+
+    Unmove {
+      mv: *mv,
+      captured,
+      captured_sq,
+      piece_moved: piece_type,
+      prev_castling,
+      prev_ep,
+      prev_halfmove,
+    }
+  }
+
+  pub fn unmake_move(&mut self, unmove: &Unmove) {
+    let them = self.side_to_move; // After make_move, side_to_move is the opponent
+    let us = them.opposite();
+    let mv = &unmove.mv;
+    let from_mask = square_mask(mv.from);
+    let to_mask = square_mask(mv.to);
+
+    // Restore side to move first
+    self.side_to_move = us;
+
+    // Determine the piece that was moved (accounting for promotion)
+    let piece_on_to = if unmove.mv.promotion.is_some() {
+      unmove.mv.promotion.unwrap()
+    } else {
+      unmove.piece_moved
+    };
+
+    // Move the piece back
+    self.piece_bb[piece_on_to as usize] &= !to_mask;
+    self.piece_bb[unmove.piece_moved as usize] |= from_mask;
+    self.color_bb[us as usize] &= !to_mask;
+    self.color_bb[us as usize] |= from_mask;
+
+    // Restore captured piece
+    if unmove.captured != PieceType::None {
+      self.place_piece(unmove.captured_sq, unmove.captured, them);
+    }
+
+    // Handle castling (move rook back)
+    if unmove.piece_moved == PieceType::King {
+      let from_file = get_file(mv.from);
+      let to_file = get_file(mv.to);
+      if from_file == 4 && to_file == 6 {
+        // Kingside castle - move rook back
+        let rook_from = if us == Color::White { 7 } else { 63 };
+        let rook_to = if us == Color::White { 5 } else { 61 };
+        let rook_from_mask = square_mask(rook_from);
+        let rook_to_mask = square_mask(rook_to);
+        self.piece_bb[PieceType::Rook as usize] &= !rook_to_mask;
+        self.piece_bb[PieceType::Rook as usize] |= rook_from_mask;
+        self.color_bb[us as usize] &= !rook_to_mask;
+        self.color_bb[us as usize] |= rook_from_mask;
+      } else if from_file == 4 && to_file == 2 {
+        // Queenside castle - move rook back
+        let rook_from = if us == Color::White { 0 } else { 56 };
+        let rook_to = if us == Color::White { 3 } else { 59 };
+        let rook_from_mask = square_mask(rook_from);
+        let rook_to_mask = square_mask(rook_to);
+        self.piece_bb[PieceType::Rook as usize] &= !rook_to_mask;
+        self.piece_bb[PieceType::Rook as usize] |= rook_from_mask;
+        self.color_bb[us as usize] &= !rook_to_mask;
+        self.color_bb[us as usize] |= rook_from_mask;
+      }
+    }
+
+    // Restore state
+    self.castling_rights = unmove.prev_castling;
+    self.en_passant_square = unmove.prev_ep;
+    self.halfmove_clock = unmove.prev_halfmove;
+
+    // Restore fullmove number
+    if us == Color::Black {
+      self.fullmove_number -= 1;
+    }
+
+    // Update occupied
+    self.occupied = self.color_bb[0] | self.color_bb[1];
+  }
+
   fn calc_hash(&mut self) {
     //calculate zobrist hash for current position
     self.hash = 0;
@@ -433,5 +710,3 @@ impl Board {
       }
     }
   }
-
-
