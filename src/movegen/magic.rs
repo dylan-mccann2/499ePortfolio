@@ -1,7 +1,7 @@
 use crate::board::bitboard::*;
 use lazy_static::lazy_static;
 
-// Pre-computed magic numbers (from Stockfish/other engines)
+// Pre-computed magic numbers (from Stockfish)
 // These are well-known constants that provide perfect hashing for slider attacks
 const ROOK_MAGIC_NUMBERS: [u64; 64] = [
     0x0080001020400080, 0x0040001000200040, 0x0080081000200080, 0x0080040800100080,
@@ -135,19 +135,19 @@ fn generate_bishop_mask(sq: u8) -> Bitboard {
         mask |= square_mask((rank + i) * 8 + (file + i));
     }
     for i in 1.. {
-        if rank + i > 6 || file < i {
+        if rank + i > 6 || file <= i {
             break;
         }
         mask |= square_mask((rank + i) * 8 + (file - i));
     }
     for i in 1.. {
-        if rank < i || file + i > 6 {
+        if rank <= i || file + i > 6 {
             break;
         }
         mask |= square_mask((rank - i) * 8 + (file + i));
     }
     for i in 1.. {
-        if rank < i || file < i {
+        if rank <= i || file <= i {
             break;
         }
         mask |= square_mask((rank - i) * 8 + (file - i));

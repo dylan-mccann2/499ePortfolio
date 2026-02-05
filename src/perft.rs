@@ -84,6 +84,7 @@ fn move_to_uci(mv: &Move) -> String {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     // Standard perft test positions
@@ -114,7 +115,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Takes longer, run with --ignored
     fn perft_startpos_depth_5() {
         let mut board = Board::startpos();
         assert_eq!(perft(&mut board, 5), 4865609);
@@ -141,7 +141,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn perft_kiwipete_depth_4() {
         let mut board = Board::from_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1").unwrap();
         assert_eq!(perft(&mut board, 4), 4085603);
