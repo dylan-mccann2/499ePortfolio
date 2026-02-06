@@ -1,6 +1,6 @@
-use chess::board::Board;
+use chess::uci::Uci;
 
 fn main() {
-    let board = Board::startpos();
-    println!("Starting position: {:?}", board);
+    let mut uci = Uci::new();
+    uci.run();
 }

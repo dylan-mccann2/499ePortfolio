@@ -74,6 +74,10 @@ pub struct Move {
     pub promotion: Option<PieceType>,
 }
 
+pub fn get_knight_attacks(sq: u8) -> Bitboard {
+    KNIGHT_ATTACK_TABLE[sq as usize]
+}
+
 pub fn get_rook_attacks(sq: u8, blockers: Bitboard) -> Bitboard {
     let magic = &magic::ROOK_MAGICS[sq as usize];
     let index = (blockers & magic.mask).wrapping_mul(magic.magic) >> magic.shift;

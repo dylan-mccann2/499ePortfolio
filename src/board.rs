@@ -67,6 +67,7 @@ pub struct Unmove {
   pub prev_castling: CastlingRights,
   pub prev_ep: Option<u8>,
   pub prev_halfmove: u8,
+  pub prev_hash: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,6 +143,10 @@ impl Board {
 
   pub fn get_castling_rights(&self) -> CastlingRights {
     self.castling_rights
+  }
+
+  pub fn get_hash(&self) -> u64 {
+    self.hash
   }
 
   pub fn new() -> Self{
@@ -353,6 +358,7 @@ impl Board {
     let prev_castling = self.castling_rights;
     let prev_ep = self.en_passant_square;
     let prev_halfmove = self.halfmove_clock;
+    let prev_hash = self.hash;
 
     // Find the piece type being moved
     let piece_type = self.piece_at(mv.from);
@@ -367,6 +373,8 @@ impl Board {
         if mv.to == ep_sq {
           captured_sq = if us == Color::White { ep_sq - 8 } else { ep_sq + 8 };
           captured = PieceType::Pawn;
+          // Update hash for captured pawn
+          self.hash ^= zobrist_keys()[PieceType::Pawn as usize][them as usize][captured_sq as usize];
           self.remove_piece(captured_sq, PieceType::Pawn, them);
         }
       }
@@ -374,8 +382,13 @@ impl Board {
 
     // Remove captured piece (non-ep)
     if captured != PieceType::None && captured_sq == mv.to {
+      // Update hash for captured piece
+      self.hash ^= zobrist_keys()[captured as usize][them as usize][mv.to as usize];
       self.remove_piece(mv.to, captured, them);
     }
+
+    // Update hash: remove piece from source square
+    self.hash ^= zobrist_keys()[piece_type as usize][us as usize][mv.from as usize];
 
     // Move the piece
     self.piece_bb[piece_type as usize] &= !from_mask;
@@ -384,10 +397,16 @@ impl Board {
     self.color_bb[us as usize] |= to_mask;
 
     // Handle promotion
-    if let Some(promo_piece) = mv.promotion {
+    let final_piece = if let Some(promo_piece) = mv.promotion {
       self.piece_bb[PieceType::Pawn as usize] &= !to_mask;
       self.piece_bb[promo_piece as usize] |= to_mask;
-    }
+      promo_piece
+    } else {
+      piece_type
+    };
+
+    // Update hash: add piece to destination square
+    self.hash ^= zobrist_keys()[final_piece as usize][us as usize][mv.to as usize];
 
     // Handle castling
     if piece_type == PieceType::King {
@@ -399,6 +418,9 @@ impl Board {
         let rook_to = if us == Color::White { 5 } else { 61 };
         let rook_from_mask = square_mask(rook_from);
         let rook_to_mask = square_mask(rook_to);
+        // Update hash for rook movement
+        self.hash ^= zobrist_keys()[PieceType::Rook as usize][us as usize][rook_from as usize];
+        self.hash ^= zobrist_keys()[PieceType::Rook as usize][us as usize][rook_to as usize];
         self.piece_bb[PieceType::Rook as usize] &= !rook_from_mask;
         self.piece_bb[PieceType::Rook as usize] |= rook_to_mask;
         self.color_bb[us as usize] &= !rook_from_mask;
@@ -409,12 +431,21 @@ impl Board {
         let rook_to = if us == Color::White { 3 } else { 59 };
         let rook_from_mask = square_mask(rook_from);
         let rook_to_mask = square_mask(rook_to);
+        // Update hash for rook movement
+        self.hash ^= zobrist_keys()[PieceType::Rook as usize][us as usize][rook_from as usize];
+        self.hash ^= zobrist_keys()[PieceType::Rook as usize][us as usize][rook_to as usize];
         self.piece_bb[PieceType::Rook as usize] &= !rook_from_mask;
         self.piece_bb[PieceType::Rook as usize] |= rook_to_mask;
         self.color_bb[us as usize] &= !rook_from_mask;
         self.color_bb[us as usize] |= rook_to_mask;
       }
     }
+
+    // Update castling rights hash (remove old rights)
+    if prev_castling.white_kingside { self.hash ^= zobrist_castling_rights()[0]; }
+    if prev_castling.white_queenside { self.hash ^= zobrist_castling_rights()[1]; }
+    if prev_castling.black_kingside { self.hash ^= zobrist_castling_rights()[2]; }
+    if prev_castling.black_queenside { self.hash ^= zobrist_castling_rights()[3]; }
 
     // Update castling rights
     if piece_type == PieceType::King {
@@ -444,6 +475,17 @@ impl Board {
       _ => {}
     }
 
+    // Update castling rights hash (add new rights)
+    if self.castling_rights.white_kingside { self.hash ^= zobrist_castling_rights()[0]; }
+    if self.castling_rights.white_queenside { self.hash ^= zobrist_castling_rights()[1]; }
+    if self.castling_rights.black_kingside { self.hash ^= zobrist_castling_rights()[2]; }
+    if self.castling_rights.black_queenside { self.hash ^= zobrist_castling_rights()[3]; }
+
+    // Update en passant hash (remove old)
+    if let Some(ep_sq) = prev_ep {
+      self.hash ^= zobrist_en_passant()[ep_sq as usize];
+    }
+
     // Update en passant square
     self.en_passant_square = None;
     if piece_type == PieceType::Pawn {
@@ -452,6 +494,11 @@ impl Board {
       if (from_rank == 1 && to_rank == 3) || (from_rank == 6 && to_rank == 4) {
         self.en_passant_square = Some(if us == Color::White { mv.from + 8 } else { mv.from - 8 });
       }
+    }
+
+    // Update en passant hash (add new)
+    if let Some(ep_sq) = self.en_passant_square {
+      self.hash ^= zobrist_en_passant()[ep_sq as usize];
     }
 
     // Update halfmove clock
@@ -469,8 +516,9 @@ impl Board {
     // Update occupied
     self.occupied = self.color_bb[0] | self.color_bb[1];
 
-    // Switch side to move
+    // Switch side to move and update hash
     self.side_to_move = them;
+    self.hash ^= zobrist_side_to_move();
 
     Unmove {
       mv: *mv,
@@ -480,6 +528,7 @@ impl Board {
       prev_castling,
       prev_ep,
       prev_halfmove,
+      prev_hash,
     }
   }
 
@@ -542,6 +591,7 @@ impl Board {
     self.castling_rights = unmove.prev_castling;
     self.en_passant_square = unmove.prev_ep;
     self.halfmove_clock = unmove.prev_halfmove;
+    self.hash = unmove.prev_hash;
 
     // Restore fullmove number
     if us == Color::Black {
