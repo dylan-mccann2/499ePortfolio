@@ -602,6 +602,80 @@ impl Board {
     self.occupied = self.color_bb[0] | self.color_bb[1];
   }
 
+  /// Returns the FEN string for the current position.
+  pub fn to_fen(&self) -> String {
+    let mut fen = String::with_capacity(64);
+
+    // 1. Piece placement (rank 8 down to rank 1)
+    for rank in (0..8).rev() {
+      let mut empty = 0u8;
+      for file in 0..8u8 {
+        let sq = rank * 8 + file;
+        let piece = self.piece_at(sq);
+        if piece == PieceType::None {
+          empty += 1;
+        } else {
+          if empty > 0 {
+            fen.push((b'0' + empty) as char);
+            empty = 0;
+          }
+          let is_white = (self.color_bb[Color::White as usize] & square_mask(sq)) != 0;
+          let ch = match piece {
+            PieceType::Pawn   => 'p',
+            PieceType::Knight => 'n',
+            PieceType::Bishop => 'b',
+            PieceType::Rook   => 'r',
+            PieceType::Queen  => 'q',
+            PieceType::King   => 'k',
+            _ => unreachable!(),
+          };
+          fen.push(if is_white { ch.to_ascii_uppercase() } else { ch });
+        }
+      }
+      if empty > 0 {
+        fen.push((b'0' + empty) as char);
+      }
+      if rank > 0 {
+        fen.push('/');
+      }
+    }
+
+    // 2. Side to move
+    fen.push(' ');
+    fen.push(if self.side_to_move == Color::White { 'w' } else { 'b' });
+
+    // 3. Castling rights
+    fen.push(' ');
+    let cr = &self.castling_rights;
+    if !cr.white_kingside && !cr.white_queenside && !cr.black_kingside && !cr.black_queenside {
+      fen.push('-');
+    } else {
+      if cr.white_kingside  { fen.push('K'); }
+      if cr.white_queenside { fen.push('Q'); }
+      if cr.black_kingside  { fen.push('k'); }
+      if cr.black_queenside { fen.push('q'); }
+    }
+
+    // 4. En passant square
+    fen.push(' ');
+    if let Some(ep) = self.en_passant_square {
+      fen.push((b'a' + get_file(ep)) as char);
+      fen.push((b'1' + get_rank(ep)) as char);
+    } else {
+      fen.push('-');
+    }
+
+    // 5. Halfmove clock
+    fen.push(' ');
+    fen.push_str(&self.halfmove_clock.to_string());
+
+    // 6. Fullmove number
+    fen.push(' ');
+    fen.push_str(&self.fullmove_number.to_string());
+
+    fen
+  }
+
   fn calc_hash(&mut self) {
     //calculate zobrist hash for current position
     self.hash = 0;
@@ -740,6 +814,31 @@ impl Board {
       let b1 = Board::from_fen(fen).unwrap();
       let b2 = Board::from_fen(fen).unwrap();
       assert_eq!(b1.hash, b2.hash);
+    }
+
+    #[test]
+    fn to_fen_startpos() {
+      let b = Board::startpos();
+      assert_eq!(
+        b.to_fen(),
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+      );
+    }
+
+    #[test]
+    fn to_fen_roundtrip() {
+      let fens = [
+        "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1",
+        "rnbqkbnr/pp1ppppp/8/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 1 2",
+        "r1bqk2r/ppppbppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4",
+        "8/8/8/8/8/8/8/4K2R w K - 0 1",
+        "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1",
+        "3k4/4P3/8/8/8/8/8/4K3 w - - 0 1",
+      ];
+      for fen in fens {
+        let board = Board::from_fen(fen).expect(&format!("failed to parse: {}", fen));
+        assert_eq!(board.to_fen(), fen);
+      }
     }
 
     #[test]

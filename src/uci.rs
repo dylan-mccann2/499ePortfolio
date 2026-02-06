@@ -4,7 +4,7 @@
 
 use std::io::{self, BufRead, Write};
 
-use crate::board::Board;
+use crate::board::{Board, Color, PieceType, get_file, get_rank};
 use crate::movegen::Move;
 use crate::search::{search_with_state, is_in_check, generate_legal_moves, SearchState, CHECKMATE_SCORE};
 
@@ -552,6 +552,125 @@ fn square_to_algebraic(sq: u8) -> String {
     s
 }
 
+/// Convert a move in Standard Algebraic Notation (SAN) to UCI notation.
+///
+/// Requires the current board position to resolve ambiguity, since SAN
+/// encodes only the destination and piece type (e.g. "Nf3") while UCI
+/// needs both source and destination squares (e.g. "g1f3").
+///
+/// Supports: piece moves (`Nf3`), pawn moves (`e4`), captures (`exd5`, `Nxf3`),
+/// disambiguation (`Nbd2`, `R1d1`), promotion (`e8=Q`), castling (`O-O`, `O-O-O`),
+/// and check/checkmate suffixes (`+`, `#`).
+pub fn algebraic_to_uci(board: &mut Board, san: &str) -> Option<String> {
+    let mv = parse_san(board, san)?;
+    let mut s = String::with_capacity(5);
+    s.push_str(&square_to_algebraic(mv.from));
+    s.push_str(&square_to_algebraic(mv.to));
+    if let Some(promo) = mv.promotion {
+        s.push(match promo {
+            PieceType::Queen => 'q',
+            PieceType::Rook => 'r',
+            PieceType::Bishop => 'b',
+            PieceType::Knight => 'n',
+            _ => return None,
+        });
+    }
+    Some(s)
+}
+
+/// Parse a move in Standard Algebraic Notation into a Move struct.
+fn parse_san(board: &mut Board, san: &str) -> Option<Move> {
+    let legal_moves = generate_legal_moves(board);
+
+    // Strip check/checkmate indicators
+    let san = san.trim_end_matches(['+', '#']);
+
+    // Handle castling
+    if san == "O-O" || san == "0-0" {
+        let king_sq = if board.get_side_to_move() == Color::White { 4u8 } else { 60u8 };
+        let to_sq = if board.get_side_to_move() == Color::White { 6u8 } else { 62u8 };
+        return legal_moves.into_iter().find(|m| m.from == king_sq && m.to == to_sq);
+    }
+    if san == "O-O-O" || san == "0-0-0" {
+        let king_sq = if board.get_side_to_move() == Color::White { 4u8 } else { 60u8 };
+        let to_sq = if board.get_side_to_move() == Color::White { 2u8 } else { 58u8 };
+        return legal_moves.into_iter().find(|m| m.from == king_sq && m.to == to_sq);
+    }
+
+    let chars: Vec<char> = san.chars().collect();
+    if chars.is_empty() {
+        return None;
+    }
+
+    // Determine piece type from leading uppercase letter
+    let (piece, start) = if chars[0].is_ascii_uppercase() {
+        let p = match chars[0] {
+            'K' => PieceType::King,
+            'Q' => PieceType::Queen,
+            'R' => PieceType::Rook,
+            'B' => PieceType::Bishop,
+            'N' => PieceType::Knight,
+            _ => return None,
+        };
+        (p, 1)
+    } else {
+        (PieceType::Pawn, 0)
+    };
+
+    // Strip capture indicator
+    let rest: Vec<char> = chars[start..].iter().copied().filter(|&c| c != 'x').collect();
+
+    // Split off promotion suffix (e.g. "=Q")
+    let (rest, promotion) = if let Some(eq_pos) = rest.iter().position(|&c| c == '=') {
+        let promo = match *rest.get(eq_pos + 1)? {
+            'Q' => PieceType::Queen,
+            'R' => PieceType::Rook,
+            'B' => PieceType::Bishop,
+            'N' => PieceType::Knight,
+            _ => return None,
+        };
+        (&rest[..eq_pos], Some(promo))
+    } else {
+        (&rest[..], None)
+    };
+
+    // The last two characters are the destination square (file + rank)
+    if rest.len() < 2 {
+        return None;
+    }
+    let dest_file = rest[rest.len() - 2];
+    let dest_rank = rest[rest.len() - 1];
+    if !dest_file.is_ascii_lowercase() || !dest_rank.is_ascii_digit() {
+        return None;
+    }
+    let to_file = (dest_file as u8).wrapping_sub(b'a');
+    let to_rank = (dest_rank as u8).wrapping_sub(b'1');
+    if to_file >= 8 || to_rank >= 8 {
+        return None;
+    }
+    let to_sq = to_rank * 8 + to_file;
+
+    // Everything before the destination is disambiguation (file, rank, or both)
+    let disambig = &rest[..rest.len() - 2];
+    let disambig_file: Option<u8> = disambig.iter()
+        .find(|c| c.is_ascii_lowercase())
+        .map(|&c| (c as u8) - b'a');
+    let disambig_rank: Option<u8> = disambig.iter()
+        .find(|c| c.is_ascii_digit())
+        .map(|&c| (c as u8) - b'1');
+
+    // Find the unique legal move matching all constraints
+    let side = board.get_side_to_move();
+    legal_moves.into_iter().find(|m| {
+        m.to == to_sq
+            && board.piece_at(m.from) == piece
+            && (board.get_color_bb(side) & (1u64 << m.from)) != 0
+            && m.promotion == promotion
+            && disambig_file.map_or(true, |f| get_file(m.from) == f)
+            && disambig_rank.map_or(true, |r| get_rank(m.from) == r)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -607,5 +726,66 @@ mod tests {
         let mut uci = Uci::new();
         uci.handle_command("position fen rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1");
         assert_eq!(uci.board.get_side_to_move(), crate::board::Color::Black);
+    }
+
+    #[test]
+    fn test_algebraic_to_uci_pawn_moves() {
+        let mut board = Board::startpos();
+        assert_eq!(algebraic_to_uci(&mut board, "e4"), Some("e2e4".to_string()));
+        assert_eq!(algebraic_to_uci(&mut board, "e3"), Some("e2e3".to_string()));
+        assert_eq!(algebraic_to_uci(&mut board, "d4"), Some("d2d4".to_string()));
+    }
+
+    #[test]
+    fn test_algebraic_to_uci_piece_moves() {
+        let mut board = Board::startpos();
+        assert_eq!(algebraic_to_uci(&mut board, "Nf3"), Some("g1f3".to_string()));
+        assert_eq!(algebraic_to_uci(&mut board, "Nc3"), Some("b1c3".to_string()));
+    }
+
+    #[test]
+    fn test_algebraic_to_uci_captures() {
+        // Position after 1.e4 d5
+        let mut board = Board::from_fen("rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2").unwrap();
+        assert_eq!(algebraic_to_uci(&mut board, "exd5"), Some("e4d5".to_string()));
+    }
+
+    #[test]
+    fn test_algebraic_to_uci_castling() {
+        // Position where white can castle kingside
+        let mut board = Board::from_fen("r1bqk2r/ppppbppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4").unwrap();
+        assert_eq!(algebraic_to_uci(&mut board, "O-O"), Some("e1g1".to_string()));
+    }
+
+    #[test]
+    fn test_algebraic_to_uci_promotion() {
+        // White pawn on e7, can promote
+        let mut board = Board::from_fen("3k4/4P3/8/8/8/8/8/4K3 w - - 0 1").unwrap();
+        assert_eq!(algebraic_to_uci(&mut board, "e8=Q"), Some("e7e8q".to_string()));
+        assert_eq!(algebraic_to_uci(&mut board, "e8=N"), Some("e7e8n".to_string()));
+    }
+
+    #[test]
+    fn test_algebraic_to_uci_with_check_suffix() {
+        let mut board = Board::startpos();
+        // "Nf3+" should work the same as "Nf3" (strip the +)
+        assert_eq!(algebraic_to_uci(&mut board, "Nf3+"), Some("g1f3".to_string()));
+    }
+
+    #[test]
+    fn test_algebraic_to_uci_disambiguation() {
+        // Two rooks that can both reach d1: need file disambiguation
+        let mut board = Board::from_fen("3k4/8/8/8/8/8/4K3/R4R2 w - - 0 1").unwrap();
+        assert_eq!(algebraic_to_uci(&mut board, "Rad1"), Some("a1d1".to_string()));
+        assert_eq!(algebraic_to_uci(&mut board, "Rfd1"), Some("f1d1".to_string()));
+    }
+
+    #[test]
+    fn test_algebraic_to_uci_invalid() {
+        let mut board = Board::startpos();
+        assert_eq!(algebraic_to_uci(&mut board, ""), None);
+        assert_eq!(algebraic_to_uci(&mut board, "Zf3"), None);
+        // Illegal move from start position
+        assert_eq!(algebraic_to_uci(&mut board, "e5"), None);
     }
 }
