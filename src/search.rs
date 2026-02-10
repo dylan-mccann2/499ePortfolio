@@ -42,7 +42,7 @@ impl SearchState {
         SearchState {
             nodes: 0,
             tt_hits: 0,
-            tt: TranspositionTable::new(16), // 16 MB default
+            tt: TranspositionTable::new(64), // 64 MB default
             ply: 0,
         }
     }

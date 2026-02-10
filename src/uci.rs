@@ -6,7 +6,11 @@ use std::io::{self, BufRead, Write};
 
 use crate::board::{Board, Color, PieceType, get_file, get_rank};
 use crate::movegen::Move;
+use crate::openings::{Opening, import_openings, lookup_opening};
 use crate::search::{search_with_state, is_in_check, generate_legal_moves, SearchState, CHECKMATE_SCORE};
+
+use mongodb::{Client, Collection};
+use tokio::runtime::Runtime;
 
 const ENGINE_NAME: &str = "ChessEngine";
 const ENGINE_AUTHOR: &str = "Dylan";
@@ -17,14 +21,31 @@ pub struct Uci {
     board: Board,
     debug: bool,
     search_state: SearchState,
+    runtime: Runtime,
+    db_client: Option<Client>,
+    openings: Option<Collection<Opening>>,
 }
 
 impl Uci {
     pub fn new() -> Self {
+        let runtime = Runtime::new().expect("failed to create tokio runtime");
+
+        // Try to connect to MongoDB for opening lookups
+        let db_client = runtime.block_on(async {
+            Client::with_uri_str("mongodb://localhost:27017").await.ok()
+        });
+
+        let openings = db_client.as_ref().map(|c| {
+            c.database("chess").collection::<Opening>("openings")
+        });
+
         Uci {
             board: Board::startpos(),
             debug: false,
             search_state: SearchState::with_tt_size(DEFAULT_HASH_SIZE),
+            runtime,
+            db_client,
+            openings,
         }
     }
 
@@ -96,15 +117,7 @@ impl Uci {
                 self.cmd_go(&tokens);
                 None
             }
-            "stop" => {
-                // For now, search is synchronous so stop does nothing
-                None
-            }
-            "ponderhit" => {
-                // Pondering not implemented
-                None
-            }
-            "quit" => Some(true),
+"quit" => Some(true),
             // Non-standard but useful commands
             "d" | "display" => {
                 self.cmd_display();
@@ -112,6 +125,10 @@ impl Uci {
             }
             "perft" => {
                 self.cmd_perft(&tokens);
+                None
+            }
+            "importopenings" => {
+                self.cmd_import_openings(&tokens);
                 None
             }
             _ => {
@@ -265,12 +282,6 @@ impl Uci {
     /// Handle 'go' command
     fn cmd_go(&mut self, tokens: &[&str]) {
         let mut depth: Option<u8> = None;
-        let mut movetime: Option<u64> = None;
-        let mut _wtime: Option<u64> = None;
-        let mut _btime: Option<u64> = None;
-        let mut _winc: Option<u64> = None;
-        let mut _binc: Option<u64> = None;
-        let mut _movestogo: Option<u32> = None;
         let mut infinite = false;
 
         let mut i = 1;
@@ -282,47 +293,8 @@ impl Uci {
                         i += 1;
                     }
                 }
-                "movetime" => {
-                    if i + 1 < tokens.len() {
-                        movetime = tokens[i + 1].parse().ok();
-                        i += 1;
-                    }
-                }
-                "wtime" => {
-                    if i + 1 < tokens.len() {
-                        _wtime = tokens[i + 1].parse().ok();
-                        i += 1;
-                    }
-                }
-                "btime" => {
-                    if i + 1 < tokens.len() {
-                        _btime = tokens[i + 1].parse().ok();
-                        i += 1;
-                    }
-                }
-                "winc" => {
-                    if i + 1 < tokens.len() {
-                        _winc = tokens[i + 1].parse().ok();
-                        i += 1;
-                    }
-                }
-                "binc" => {
-                    if i + 1 < tokens.len() {
-                        _binc = tokens[i + 1].parse().ok();
-                        i += 1;
-                    }
-                }
-                "movestogo" => {
-                    if i + 1 < tokens.len() {
-                        _movestogo = tokens[i + 1].parse().ok();
-                        i += 1;
-                    }
-                }
                 "infinite" => {
                     infinite = true;
-                }
-                "ponder" => {
-                    // Pondering not implemented
                 }
                 _ => {}
             }
@@ -332,12 +304,9 @@ impl Uci {
         // Determine search depth
         let search_depth = if let Some(d) = depth {
             d
-        } else if movetime.is_some() || infinite {
-            // For time-based search, use iterative deepening with a reasonable max
-            // TODO: Implement proper time management
+        } else if infinite {
             6
         } else {
-            // Default depth if no parameters given
             5
         };
 
@@ -496,6 +465,47 @@ impl Uci {
 
         let legal_moves = generate_legal_moves(&mut self.board.clone());
         println!("Legal moves: {}", legal_moves.len());
+
+        // Look up opening name from database
+        if let Some(ref collection) = self.openings {
+            let fen = self.board.to_fen();
+            if let Some(name) = self.runtime.block_on(lookup_opening(collection, &fen)) {
+                println!("Opening: {}", name);
+            }
+        }
+    }
+
+    /// Ensure the MongoDB client and openings collection are initialized.
+    fn ensure_db(&mut self) -> bool {
+        if self.db_client.is_none() {
+            self.db_client = self.runtime.block_on(async {
+                Client::with_uri_str("mongodb://localhost:27017").await.ok()
+            });
+            self.openings = self.db_client.as_ref().map(|c| {
+                c.database("chess").collection::<Opening>("openings")
+            });
+        }
+        self.openings.is_some()
+    }
+
+    /// Handle 'importopenings <dir>' command (non-standard)
+    fn cmd_import_openings(&mut self, tokens: &[&str]) {
+        if tokens.len() < 2 {
+            eprintln!("usage: importopenings <directory>");
+            return;
+        }
+
+        if !self.ensure_db() {
+            eprintln!("error: failed to connect to MongoDB at mongodb://localhost:27017");
+            return;
+        }
+
+        let dir = std::path::Path::new(tokens[1]);
+        let collection = self.openings.clone().unwrap();
+        match self.runtime.block_on(import_openings(dir, &collection)) {
+            Ok(()) => {}
+            Err(e) => eprintln!("import failed: {}", e),
+        }
     }
 
     /// Handle 'perft' command (non-standard)
@@ -579,7 +589,7 @@ pub fn algebraic_to_uci(board: &mut Board, san: &str) -> Option<String> {
 }
 
 /// Parse a move in Standard Algebraic Notation into a Move struct.
-fn parse_san(board: &mut Board, san: &str) -> Option<Move> {
+pub fn parse_san(board: &mut Board, san: &str) -> Option<Move> {
     let legal_moves = generate_legal_moves(board);
 
     // Strip check/checkmate indicators
